@@ -44,42 +44,48 @@ def evidenzia_discrepanze(row):
     return stile_base
 
 # ==============================================================================
-# 2. ESTRATTORE STANDARD: REPORT MANAGER (NON TOCCARE)
+# 2. ESTRATTORE STANDARD: REPORT MANAGER (AGGIORNATO CON LETTURA LINEARE)
 # ==============================================================================
 
 def estrai_report(pdf_path):
     dati_estratti = []
+    
+    # REGEX MASTER PER IL REPORT ETERNOO
+    # Cattura in modo infallibile la sequenza dati a prescindere dai salti pagina.
+    pattern_riga = r'^(?:M|E)?\s*(\d{3,8})\s+(?:M|E)?\s*(\d{2}/\d{2}/\d{4})\s+([a-zA-Z0-9]+)\s+(.*?)\s+([\d\,\.]+)\s+([a-zA-Z0-9\.]{1,4})\s+([\d\,\.]+)\s+([\d\,\.]+)(?:\s+[\d\,\.]+)?[\s\*]*$'
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                tabelle = page.extract_tables()
-                if not tabelle: continue
+                # Layout=True ci permette di avere gli spazi reali tra le colonne
+                testo_pagina = page.extract_text(layout=True)
+                if not testo_pagina: continue
                 
-                tabella = tabelle[-1]
-                for row in tabella:
-                    row_pulita = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in row]
+                righe = testo_pagina.split('\n')
+                for line in righe:
+                    # Pulizia preventiva per artefatti grafici
+                    line = line.replace('|', '').strip()
+                    if not line: continue
                     
-                    if len(row_pulita) >= 9:
-                        codice = row_pulita[3].strip()
-                        ddt_greggio = row_pulita[1].strip()
-                        col_0_greggia = row_pulita[0].strip()
+                    # Il motore Regex aggancia direttamente la "firma" della riga dati
+                    match = re.search(pattern_riga, line)
+                    
+                    if match:
+                        ddt_greggio = match.group(1).strip()
+                        data = match.group(2).strip()
+                        codice = match.group(3).strip()
+                        descrizione = match.group(4).strip()
                         
-                        if not codice or codice == "CODICE": continue
-                        if col_0_greggia.startswith("CANTI") or ddt_greggio.startswith("ERE:"): continue
-                            
-                        ddt_clean = str(int(ddt_greggio)) if ddt_greggio.isdigit() else ddt_greggio 
-                        data = row_pulita[2]
-                        descrizione = row_pulita[4].strip()
+                        # Parsing numerico
+                        prezzo_unit = pulisci_numero(match.group(5))
+                        quantita = pulisci_numero(match.group(7))
+                        totale = pulisci_numero(match.group(8))
                         
-                        prezzo_unit = pulisci_numero(row_pulita[5])
-                        quantita = pulisci_numero(row_pulita[7])
-                        totale = pulisci_numero(row_pulita[8])
-                        
-                        um = row_pulita[6].upper()
+                        # Normalizzazione Unità di Misura
+                        um = match.group(6).upper().replace('.', '').strip()
                         if um in ["N", "PZ"]: um = "NR"
                         
                         dati_estratti.append({
-                            'DDT': ddt_clean,
+                            'DDT': str(int(ddt_greggio)),
                             'Data_Report': data,
                             'Codice': codice,
                             'Descrizione_Report': descrizione,
@@ -88,8 +94,11 @@ def estrai_report(pdf_path):
                             'UM_Report': um,
                             'Totale_Report': totale
                         })
+                        
     except Exception as e:
-        print(f"Errore estrazione report {pdf_path}: {e}")
+        print(f"Errore estrazione report ({pdf_path}): {e}")
+        return pd.DataFrame()  # Ritorna un DataFrame vuoto in caso di errore
+    
     return pd.DataFrame(dati_estratti)
 
 # ==============================================================================
