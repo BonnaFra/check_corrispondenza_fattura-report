@@ -52,7 +52,8 @@ def estrai_report(pdf_path):
     
     # REGEX MASTER PER IL REPORT ETERNOO
     # Cattura in modo infallibile la sequenza dati a prescindere dai salti pagina.
-    pattern_riga = r'^(?:M|E)?\s*(\d{3,8})\s+(?:M|E)?\s*(\d{2}/\d{2}/\d{4})\s+([a-zA-Z0-9]+)\s+(.*?)\s+([\d\,\.]+)\s+([a-zA-Z0-9\.]{1,4})\s+([\d\,\.]+)\s+([\d\,\.]+)(?:\s+[\d\,\.]+)?[\s\*]*$'
+    # REGEX AGGIORNATA: Ora accetta il punto "." nel gruppo del codice articolo (gruppo 3)
+    pattern_riga = r'^(?:M|E)?\s*(\d{3,8})\s+(?:M|E)?\s*(\d{2}/\d{2}/\d{4})\s+([a-zA-Z0-9\.]+)\s+(.*?)\s+([\d\,\.]+)\s+([a-zA-Z0-9\.]{1,4})\s+([\d\,\.]+)\s+([\d\,\.]+)(?:\s+[\d\,\.]+)?[\s\*]*$'
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
@@ -73,6 +74,10 @@ def estrai_report(pdf_path):
                         ddt_greggio = match.group(1).strip()
                         data = match.group(2).strip()
                         codice = match.group(3).strip()
+
+                        if codice.endswith('.1'):
+                            codice = codice[:-2]  # Rimuove il ".1" finale se presente
+
                         descrizione = match.group(4).strip()
                         
                         # Parsing numerico
@@ -216,11 +221,32 @@ def avvia_elaborazione():
         messagebox.showwarning("Dati Mancanti", "Uno dei due documenti non contiene dati validi o l'estrazione è fallita.")
         return
 
+    # --- FIX PUNTO 1: DIZIONARIO CODICI STORPIATI (Data Entry Errato) ---
+    mappatura_codici = {
+        'TRE00000': 'TRE0',
+        'GRUN0000': 'GRUN000'
+    }
+
+    # Applichiamo il dizionario alla colonna Codice della FATTURA
+    if 'Codice' in df_fattura.columns:
+        df_fattura['Codice'] = df_fattura['Codice'].replace(mappatura_codici)
+
     # Arrotondamento (Fix Floating Point)
     for col in ['Qta_Fattura', 'Prezzo_Unit_Fattura', 'Totale_Fattura']:
         if col in df_fattura.columns: df_fattura[col] = df_fattura[col].round(2)
     for col in ['Qta_Report', 'Prezzo_Unit_Report', 'Totale_Report']:
         if col in df_report.columns: df_report[col] = df_report[col].round(2)
+
+# --- FIX PUNTO 3: AGGREGAZIONE (GROUPBY) ARTICOLI DIVISI SU PIU' CANTIERI ---
+    if not df_report.empty:
+        df_report = df_report.groupby(['DDT', 'Codice'], as_index=False).agg({
+            'Data_Report': 'first',         # Mantiene la prima data trovata
+            'Descrizione_Report': 'first',  # Mantiene la prima descrizione trovata
+            'UM_Report': 'first',           # Mantiene la prima UM trovata
+            'Prezzo_Unit_Report': 'first',  # Il prezzo unitario resta invariato (NON si somma)
+            'Qta_Report': 'sum',            # SOMMA le quantità dei vari cantieri
+            'Totale_Report': 'sum'          # SOMMA i totali dei vari cantieri
+        })
 
     # Core Engine: Outer Merge
     df_merged = pd.merge(df_fattura, df_report, on=['DDT', 'Codice'], how='outer')
