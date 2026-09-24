@@ -44,42 +44,53 @@ def evidenzia_discrepanze(row):
     return stile_base
 
 # ==============================================================================
-# 2. ESTRATTORE STANDARD: REPORT MANAGER (NON TOCCARE)
+# 2. ESTRATTORE STANDARD: REPORT MANAGER (AGGIORNATO CON LETTURA LINEARE)
 # ==============================================================================
 
 def estrai_report(pdf_path):
     dati_estratti = []
+    
+    # REGEX MASTER PER IL REPORT PROTECNO
+    # Cattura in modo infallibile la sequenza dati a prescindere dai salti pagina.
+    # REGEX AGGIORNATA: Ora accetta il punto "." nel gruppo del codice articolo (gruppo 3)
+    pattern_riga = r'^(?:M|E)?\s*(\d{3,8})\s+(?:M|E)?\s*(\d{2}/\d{2}/\d{4})\s+([a-zA-Z0-9\.]+)\s+(.*?)\s+([\d\,\.]+)\s+([a-zA-Z0-9\.]{1,4})\s+([\d\,\.]+)\s+([\d\,\.]+)(?:\s+[\d\,\.]+)?[\s\*]*$'
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                tabelle = page.extract_tables()
-                if not tabelle: continue
+                # Layout=True ci permette di avere gli spazi reali tra le colonne
+                testo_pagina = page.extract_text(layout=True)
+                if not testo_pagina: continue
                 
-                tabella = tabelle[-1]
-                for row in tabella:
-                    row_pulita = [str(c).replace('\n', ' ').strip() if c is not None else "" for c in row]
+                righe = testo_pagina.split('\n')
+                for line in righe:
+                    # Pulizia preventiva per artefatti grafici
+                    line = line.replace('|', '').strip()
+                    if not line: continue
                     
-                    if len(row_pulita) >= 9:
-                        codice = row_pulita[3].strip()
-                        ddt_greggio = row_pulita[1].strip()
-                        col_0_greggia = row_pulita[0].strip()
+                    # Il motore Regex aggancia direttamente la "firma" della riga dati
+                    match = re.search(pattern_riga, line)
+                    
+                    if match:
+                        ddt_greggio = match.group(1).strip()
+                        data = match.group(2).strip()
+                        codice = match.group(3).strip()
+
+                        if codice.endswith('.1'):
+                            codice = codice[:-2]  # Rimuove il ".1" finale se presente
+
+                        descrizione = match.group(4).strip()
                         
-                        if not codice or codice == "CODICE": continue
-                        if col_0_greggia.startswith("CANTI") or ddt_greggio.startswith("ERE:"): continue
-                            
-                        ddt_clean = str(int(ddt_greggio)) if ddt_greggio.isdigit() else ddt_greggio 
-                        data = row_pulita[2]
-                        descrizione = row_pulita[4].strip()
+                        # Parsing numerico
+                        prezzo_unit = pulisci_numero(match.group(5))
+                        quantita = pulisci_numero(match.group(7))
+                        totale = pulisci_numero(match.group(8))
                         
-                        prezzo_unit = pulisci_numero(row_pulita[5])
-                        quantita = pulisci_numero(row_pulita[7])
-                        totale = pulisci_numero(row_pulita[8])
-                        
-                        um = row_pulita[6].upper()
+                        # Normalizzazione Unità di Misura
+                        um = match.group(6).upper().replace('.', '').strip()
                         if um in ["N", "PZ"]: um = "NR"
                         
                         dati_estratti.append({
-                            'DDT': ddt_clean,
+                            'DDT': str(int(ddt_greggio)),
                             'Data_Report': data,
                             'Codice': codice,
                             'Descrizione_Report': descrizione,
@@ -88,8 +99,11 @@ def estrai_report(pdf_path):
                             'UM_Report': um,
                             'Totale_Report': totale
                         })
+                        
     except Exception as e:
-        print(f"Errore estrazione report {pdf_path}: {e}")
+        print(f"Errore estrazione report ({pdf_path}): {e}")
+        return pd.DataFrame()  # Ritorna un DataFrame vuoto in caso di errore
+    
     return pd.DataFrame(dati_estratti)
 
 # ==============================================================================
@@ -134,26 +148,26 @@ def estrai_fattura_fornitore(pdf_path):
                         if not line_senza_ddt:
                             articolo_corrente = None
                             continue
-                        # Se c'è altro testo, proseguiamo l'analisi
+                        # Se c'è altro testo (es. articolo attaccato), proseguiamo l'analisi
                         line = line_senza_ddt
                         
-                    # 2. CERCA ARTICOLO (Regex tollerante per layout Protecno)
-                    pattern_art = r'^([A-Z0-9\-]+)\s+\(Codice\s*(.*?)\s+([\d\,\.]+)\s+([\d\,\.]+)\s+([A-Za-z\.]+)(?:\s+(.*?))?\s+([\d\,\.]+)\s+([\d\,\.]+)[\s\*]*$'
+                    # 2. CERCA ARTICOLO (Regex rigida sul "(Codice" ma tollerante sui numeri/UM)
+                    pattern_art = r'^([a-zA-Z0-9\-]+)\s+\(Codice\s*(.*?)\s+([\d\,\.]+)\s+([\d\,\.]+)\s+([a-zA-Z0-9\.]{1,4})(?:\s+(.*?))?\s+([\d\,\.]+)\s+([\d\,\.]+)[\s\*]*$'
                     match_art = re.match(pattern_art, line)
                     
                     if match_art and current_ddt:
                         um_estr = match_art.group(5).upper().replace('.', '').strip()
                         if um_estr in ["N", "PZ"]: um_estr = "NR" # Normalizzazione UM
                         
-                        # Puliamo la descrizione principale da eventuali linee di trattini del layout (3 o più trattini)
+                        # Puliamo la descrizione principale da linee tratteggiate e dal residuo "interno)"
                         desc_pulita = re.sub(r'-{3,}', '', match_art.group(2)).strip()
+                        desc_pulita = desc_pulita.replace("interno)", "").strip()
                         
                         # Estrazione Valori Numerici
                         qta = pulisci_numero(match_art.group(3))
                         totale = pulisci_numero(match_art.group(8))
                         
                         # CALCOLO PREZZO UNITARIO SCONTATO (Totale / Quantità)
-                        # Inserito controllo per evitare divisioni per zero
                         prezzo_unit_calcolato = (totale / qta) if qta > 0 else 0.0
                         
                         # Creiamo il dizionario dell'articolo e salviamolo in memoria
@@ -163,7 +177,7 @@ def estrai_fattura_fornitore(pdf_path):
                             'Codice': match_art.group(1).strip(),
                             'Descrizione_Fattura': desc_pulita,
                             'Qta_Fattura': qta,
-                            'Prezzo_Unit_Fattura': prezzo_unit_calcolato, # Usiamo il valore derivato dal calcolo
+                            'Prezzo_Unit_Fattura': prezzo_unit_calcolato,
                             'UM_Fattura': um_estr,
                             'Totale_Fattura': totale
                         }
@@ -171,35 +185,29 @@ def estrai_fattura_fornitore(pdf_path):
                         dati_estratti.append(articolo_corrente)
                         continue
                         
-                    # 3. GESTIONE DESCRIZIONE MULTIRIGA
-                    # Se abbiamo un articolo in memoria ma non siamo su una nuova riga articolo o DDT, è la continuazione
+                    # 3. GESTIONE DESCRIZIONE MULTIRIGA (Filter & Destroy per i Codici Doppi)
                     if articolo_corrente is not None:
-                        # Condizioni di Stop: Blocchiamo la concatenazione se arriviamo a piè di pagina o tag nascosti
-                        if any(keyword in line for keyword in ["Pagina", "Totale imponibile", "TOTALI", "AswTRiga", "AswTipoDoc", "RIEPILOGHI IVA"]):
+                        # Condizioni di Stop
+                        if any(keyword in line for keyword in ["Pagina", "Totale imponibile", "TOTALI", "AswTRiga", "AswTipoDoc", "RIEPILOGHI IVA", "esigibilità iva"]):
                             articolo_corrente = None
                             continue
                             
-                        # Pulizia del testo residuo
+                        # Pulizia chirurgica del testo residuo
                         line_pulita = line.replace("interno)", "")
-                        line_pulita = re.sub(r'\(AswArtFor\)', '', line_pulita)
+                        line_pulita = re.sub(r'\(AswArtFor\)', '', line_pulita) # Distrugge l'etichetta del duplicato
+                        line_pulita = re.sub(r'-?\d+[\.,]\d{2}%', '', line_pulita) # Rimuove sconti spuri
+                        line_pulita = re.sub(r'-{3,}', '', line_pulita) # Rimuove tratteggi
                         
-                        # Rimuoviamo sconti percentuali spuri
-                        line_pulita = re.sub(r'-?\d+[\.,]\d{2}%', '', line_pulita)
-                        
-                        # Rimuoviamo le linee tratteggiate
-                        line_pulita = re.sub(r'-{3,}', '', line_pulita)
-                        
-                        # Rimuoviamo il codice articolo corrente se dovesse ripetersi (es. bug di stampa PDF)
+                        # Se la riga contiene lo stesso codice articolo (es. il duplicato), lo polverizza
                         codice_attuale = articolo_corrente['Codice']
                         if codice_attuale in line_pulita:
                             line_pulita = line_pulita.replace(codice_attuale, '')
                             
                         line_pulita = line_pulita.strip()
                         
-                        # Aggiorniamo la descrizione in memoria
+                        # Aggiorniamo la descrizione in memoria solo se è rimasto del testo utile
                         if line_pulita:
                             articolo_corrente['Descrizione_Fattura'] += " " + line_pulita
-                            # Rimuoviamo eventuali doppi spazi
                             articolo_corrente['Descrizione_Fattura'] = re.sub(r'\s+', ' ', articolo_corrente['Descrizione_Fattura']).strip()
                         
     except Exception as e:
@@ -256,11 +264,32 @@ def avvia_elaborazione():
         messagebox.showwarning("Dati Mancanti", "Uno dei due documenti non contiene dati validi o l'estrazione è fallita.")
         return
 
+    # --- FIX PUNTO 1: DIZIONARIO CODICI STORPIATI (Data Entry Errato) ---
+    mappatura_codici = {
+        'TRE00000': 'TRE0',
+        'GRUN0000': 'GRUN000'
+    }
+
+    # Applichiamo il dizionario alla colonna Codice della FATTURA
+    if 'Codice' in df_fattura.columns:
+        df_fattura['Codice'] = df_fattura['Codice'].replace(mappatura_codici)
+
     # Arrotondamento (Fix Floating Point)
     for col in ['Qta_Fattura', 'Prezzo_Unit_Fattura', 'Totale_Fattura']:
         if col in df_fattura.columns: df_fattura[col] = df_fattura[col].round(2)
     for col in ['Qta_Report', 'Prezzo_Unit_Report', 'Totale_Report']:
         if col in df_report.columns: df_report[col] = df_report[col].round(2)
+
+# --- FIX PUNTO 3: AGGREGAZIONE (GROUPBY) ARTICOLI DIVISI SU PIU' CANTIERI ---
+    if not df_report.empty:
+        df_report = df_report.groupby(['DDT', 'Codice'], as_index=False).agg({
+            'Data_Report': 'first',         # Mantiene la prima data trovata
+            'Descrizione_Report': 'first',  # Mantiene la prima descrizione trovata
+            'UM_Report': 'first',           # Mantiene la prima UM trovata
+            'Prezzo_Unit_Report': 'first',  # Il prezzo unitario resta invariato (NON si somma)
+            'Qta_Report': 'sum',            # SOMMA le quantità dei vari cantieri
+            'Totale_Report': 'sum'          # SOMMA i totali dei vari cantieri
+        })
 
     # Core Engine: Outer Merge
     df_merged = pd.merge(df_fattura, df_report, on=['DDT', 'Codice'], how='outer')
