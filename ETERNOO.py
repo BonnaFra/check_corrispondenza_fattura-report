@@ -6,6 +6,7 @@ import shutil
 import tkinter as tk
 from tkinter import messagebox
 from datetime import datetime
+import sys
 
 # ==============================================================================
 # 1. FUNZIONI DI UTILITÀ GLOBALI
@@ -181,7 +182,13 @@ def avvia_elaborazione():
     root = tk.Tk()
     root.withdraw()
     
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, 'frozen', False):
+        # Se il programma sta girando come file .exe compilato
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # Se il programma sta girando come normale script .py
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        
     loading_dir = os.path.join(base_dir, "Files loader")
     
     # Crea cartella Files loader se non esiste
